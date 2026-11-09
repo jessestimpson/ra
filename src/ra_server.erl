@@ -2221,11 +2221,12 @@ follower_catchup_cond(_,
                       #install_snapshot_rpc{term = Term,
                                             meta = #{index := PLIdx}},
                       #{current_term := CurTerm,
-                        log := Log} = State)
+                        last_applied := LastApplied} = State)
   when Term >= CurTerm ->
-    % term is ok - check if the snapshot index is greater than the last
-    % index seen
-    {PLIdx >= ra_log:next_index(Log), State};
+    % term is ok - accept the snapshot on the same terms the follower state
+    % does. Comparing with the log's next index instead would drop a snapshot
+    % the follower needs when its log has a divergent uncommitted tail.
+    {PLIdx > LastApplied, State};
 follower_catchup_cond(_, _Msg, State) ->
     {false, State}.
 
