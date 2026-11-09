@@ -1192,6 +1192,10 @@ await_condition(_, tick_timeout,
     {State, Actions} = ?HANDLE_EFFECTS([{aux, tick}], cast,
                                        State0#state{commit_rate = CommitRate}),
     {keep_state, State, set_tick_timer(State, Actions)};
+await_condition(info, {unsuspend_peer, _}, _State) ->
+    %% Postpone until we leave await_condition. Dropping it would leave the peer
+    %% suspended if we return to leader, and nothing else would ever send to it.
+    {keep_state_and_data, [postpone]};
 await_condition({timeout, {snapshot_retry, _}}, {snapshot_retry, _}, _State) ->
     %% Postpone snapshot retry until we transition back to leader
     {keep_state_and_data, [postpone]};
