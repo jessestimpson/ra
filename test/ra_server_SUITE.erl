@@ -117,6 +117,8 @@ all() ->
      wal_down_condition_leader,
      wal_down_condition_leader_commands,
      transfer_leadership,
+     transfer_leadership_timeout_after_term_change,
+     wal_down_recovery_after_term_change,
      update_release_cursor,
      update_release_cursor_with_written_condition,
      update_release_cursor_with_no_snapshot_sends_condition,
@@ -1192,6 +1194,64 @@ transfer_leadership(_Config) ->
      [{reply, ok}, {send_msg, N2, election_timeout, cast}]} =
         ra_server:handle_leader({transfer_leadership, N2}, State0),
 
+    ok.
+
+%% A leader that transfers leadership waits in await_condition. A pre-vote for a
+%% higher term raises the term of the server during the wait. When the transfer
+%% times out, the server must not return to leader, because the server did not
+%% win the new term.
+transfer_leadership_timeout_after_term_change(_Config) ->
+    N2 = ?N2,
+    N3 = ?N3,
+    State0 = #{current_term := Term} = base_state(3, ?FUNCTION_NAME),
+    {await_condition, State1, _} =
+        ra_server:handle_leader({transfer_leadership, N2}, State0),
+
+    %% Without a term change, the timeout returns the server to leader.
+    ?assertMatch({leader, _, _},
+                 ra_server:handle_await_condition(await_condition_timeout,
+                                                  State1)),
+
+    PreVote = #pre_vote_rpc{candidate_id = N3,
+                            term = Term + 1,
+                            last_log_index = 3,
+                            last_log_term = Term,
+                            machine_version = 0,
+                            token = make_ref()},
+    {await_condition, State2, _} =
+        ra_server:handle_await_condition(PreVote, State1),
+    ?assertMatch(#{current_term := T} when T =:= Term + 1, State2),
+
+    ?assertMatch({follower, _, _},
+                 ra_server:handle_await_condition(await_condition_timeout,
+                                                  State2)),
+    ok.
+
+%% A leader that cannot write to the WAL waits in await_condition. A pre-vote
+%% for a higher term raises the term of the server during the wait. When the WAL
+%% can write again, the server must not return to leader, because the server did
+%% not win the new term.
+wal_down_recovery_after_term_change(_Config) ->
+    N3 = ?N3,
+    State0 = #{current_term := Term} = base_state(3, ?FUNCTION_NAME),
+    meck:expect(ra_log, append, fun (_, _) -> error(wal_down) end),
+    {await_condition, State1, _} =
+        ra_server:handle_leader({command, usr(<<"cmd">>)}, State0),
+
+    PreVote = #pre_vote_rpc{candidate_id = N3,
+                            term = Term + 1,
+                            last_log_index = 3,
+                            last_log_term = Term,
+                            machine_version = 0,
+                            token = make_ref()},
+    {await_condition, State2, _} =
+        ra_server:handle_await_condition(PreVote, State1),
+    ?assertMatch(#{current_term := T} when T =:= Term + 1, State2),
+
+    meck:expect(ra_log, can_write, fun (_) -> true end),
+    ?assertMatch({follower, _, _},
+                 ra_server:handle_await_condition(await_condition_timeout,
+                                                  State2)),
     ok.
 
 update_release_cursor(_Config) ->

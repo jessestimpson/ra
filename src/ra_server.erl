@@ -89,6 +89,7 @@
       aux_state => term(),
       condition => #{predicate_fun := ra_await_condition_fun(),
                      transition_to => ra_state(),
+                     leader_term => ra_term(),
                      timeout => #{duration => integer(),
                                   transition_to => ra_state(),
                                   effects => [effect()]}},
@@ -674,6 +675,7 @@ handle_leader({command, Cmd}, #{cfg := #cfg{id = Self,
             State = State0#{condition =>
                             #{predicate_fun => fun wal_down_condition/2,
                               transition_to => leader,
+                              leader_term => maps:get(current_term, State0),
                               timeout => #{duration => 5000,
                                            effects => CondEffs,
                                            transition_to => leader}}},
@@ -736,6 +738,7 @@ handle_leader({commands, Cmds}, #{cfg := #cfg{id = Self,
             State = State0#{condition =>
                             #{predicate_fun => fun wal_down_condition/2,
                               transition_to => leader,
+                              leader_term => maps:get(current_term, State0),
                               %% TODO: make duration configurable?
                               timeout => #{duration => 5000,
                                            effects => CondEffs,
@@ -1032,6 +1035,7 @@ handle_leader({transfer_leadership, ServerId},
                     {await_condition,
                      State#{condition =>
                                 #{predicate_fun => fun transfer_leadership_condition/2,
+                                  leader_term => maps:get(current_term, State),
                                   timeout => #{effects => [],
                                                transition_to => leader}}},
                      [{reply, ok}, {send_msg, ServerId, election_timeout, cast}]};
@@ -1941,13 +1945,15 @@ handle_await_condition(await_condition_timeout = Msg,
                        #{condition := #{predicate_fun := Pred} = Cond} = State0) ->
     case Pred(Msg, State0) of
         {true, State1} ->
-            CondTransitionTo = maps:get(transition_to, Cond, follower),
+            CondTransitionTo = await_condition_transition(
+                                 maps:get(transition_to, Cond, follower), Cond, State1),
             State = maps:remove(condition, State1),
             {CondTransitionTo, State, []};
         {false, State1} ->
             Timeout = maps:get(timeout, Cond, #{}),
             Effects = maps:get(effects, Timeout, []),
-            TransitionTo = maps:get(transition_to, Timeout, follower),
+            TransitionTo = await_condition_transition(
+                             maps:get(transition_to, Timeout, follower), Cond, State1),
             State = maps:remove(condition, State1),
             {TransitionTo, State, Effects}
     end;
@@ -1958,13 +1964,24 @@ handle_await_condition({ra_log_event, Evt}, State = #{log := Log0}) ->
 handle_await_condition(Msg, #{condition := #{predicate_fun := Pred} = Cond} = State0) ->
     case Pred(Msg, State0) of
         {true, State1} ->
-            TransitionTo = maps:get(transition_to, Cond, follower),
+            TransitionTo = await_condition_transition(
+                             maps:get(transition_to, Cond, follower), Cond, State1),
             State = maps:remove(condition, State1),
             {TransitionTo, State, [{next_event, Msg}]};
         {false, State} ->
             %% do not log unhandled messages as they are often expected
             {await_condition, State, []}
     end.
+
+%% A leader that waits in await_condition returns to leader only if the term
+%% has not changed. A pre-vote can raise the term during the wait, and the
+%% server did not win the new term.
+await_condition_transition(leader, #{leader_term := LeaderTerm},
+                           #{current_term := CurTerm})
+  when LeaderTerm =/= CurTerm ->
+    follower;
+await_condition_transition(TransitionTo, _Cond, _State) ->
+    TransitionTo.
 
 -spec process_new_leader_queries(ra_server_state()) ->
     {ra_server_state(), [gen_statem:from()]}.
